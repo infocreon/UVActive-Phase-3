@@ -1,0 +1,131 @@
+// ── UV Active Formula Engine — shared types ──────────────────────────
+// Every field name here matches the existing AthleteSummary / live-tick
+// shape already established in the trainer-app spec doc, plus the
+// exact field list from "Post-Workout Summary — Data Output Specification"
+// (Formula Reference PDF, page 8-9).
+
+export type Sex = "male" | "female";
+
+/** Zone 1 (Recovery) .. Zone 5 (Peak). 0 = below Zone 1 / not yet warmed up. */
+export type Zone = 0 | 1 | 2 | 3 | 4 | 5;
+
+export interface ZoneBoundaryTable {
+  /** Upper %MHR bound of each zone, e.g. {1:60,2:70,3:80,4:90,5:100} (PDF default). */
+  ceilings: Record<1 | 2 | 3 | 4 | 5, number>;
+}
+
+/** Default 5-zone table from the Formula Reference PDF, Module 01. Configurable per gym — never hardcode this table into calling code, always pass one in. */
+export const DEFAULT_ZONE_TABLE: ZoneBoundaryTable = {
+  ceilings: { 1: 60, 2: 70, 3: 80, 4: 90, 5: 100 },
+};
+
+export interface MemberProfile {
+  age: number;
+  sex: Sex;
+  weightKg: number;
+  heightCm: number;
+  restingHr: number;
+  /** Currently stored MHR — may be null for a brand-new member (compute one with computeMhr). */
+  storedMhr: number | null;
+  /** Number of completed sessions so far — gates the 5-session Karvonen adjustment and the "adaptive MHR" auto-update rule. */
+  sessionCount: number;
+}
+
+/** One raw BLE HR tick for one member, arriving roughly once per second. */
+export interface HrTick {
+  memberId: string;
+  ts: number; // epoch ms
+  bpm: number;
+}
+
+/** Per-member, per-second live dashboard payload — PDF page 9, "Real-Time Display". */
+export interface LiveTick {
+  memberId: string;
+  memberName: string;
+  currentBPM: number;
+  pctMHR: number;
+  currentZone: Zone;
+  zoneColour: string;
+  sweatPointsSoFar: number;
+  timeInCurrentZone: number; // seconds, resets on zone change
+  isPersonalBest: boolean;
+  rank?: number;
+  rssi?: number;
+  isDropped?: boolean;
+}
+
+/** Continuous per-session accumulator carried tick-to-tick. Persist this to SQLite every tick so a crash never loses progress (spec §4/§5). */
+export interface SessionAccumulatorState {
+  memberId: string;
+  mhr: number;
+  restingHr: number;
+  weightKg: number;
+  heightCm: number;
+  age: number;
+  sex: Sex;
+
+  /** Whole seconds spent in each zone so far (index 0 unused, 1-5 used). */
+  zoneSeconds: [number, number, number, number, number, number];
+  /** Intensity-weighted sweat points, accumulated per §UV Score module. */
+  sweatPoints: number;
+  /** Sum of BPM readings and reading count, for avgHr. */
+  hrSum: number;
+  hrCount: number;
+  peakHr: number;
+  /** Highest %MHR observed so far THIS session (distinct from allTimeBestPctMhr, which is across all sessions). Drives Max %HR on the post-workout summary. */
+  maxPctMhr: number;
+
+  currentZone: Zone;
+  /** Seconds spent continuously in currentZone (for zone-5-sustained alerting and timeInCurrentZone). */
+  secondsInCurrentZone: number;
+  /** Last N seconds of raw ticks kept in memory only for stall/glitch guardrails — not for storage. */
+  recentBpm: number[]; // capped ring buffer, most recent last
+
+  /** Highest %MHR ever observed for this member (any session) — for isPersonalBest. Pass in from history, default 0. */
+  allTimeBestPctMhr: number;
+
+  /** Interval-based recovery tracking (§Recovery Points improvement). */
+  intervalPeakHr: number | null;
+  intervalRestStartTs: number | null;
+  intervalRecoveries60: number[]; // one entry per completed rest interval
+
+  /** Consistency tracking, only used when the trainer sets interval targets. */
+  activeTargetZone: Zone | null;
+  targetZoneSecondsInInterval: number;
+  targetIntervalTotalSeconds: number;
+  intervalConsistencies: number[]; // % per completed interval
+
+  lastTickTs: number;
+}
+
+export type RecoveryGrade = "Elite" | "Excellent" | "Good" | "Average" | "Building" | "Needs work";
+
+export interface FinalSessionSummary {
+  memberId: string;
+  uvScore: number;
+  sweatPoints: number; // 1 decimal
+  recoveryPoints: number | null; // null if no recovery challenge was run
+  recoveryGrade: RecoveryGrade | null;
+  consistencyPct: number | null;
+  netCalories: number;
+  adjustedCalories: number | null; // only after 5+ sessions
+  epocCalories: number;
+  epocDurationHours: number;
+  avgHr: number;
+  peakHr: number;
+  avgPctMhr: number;
+  maxPctMhr: number;
+  zoneSeconds: [number, number, number, number, number, number];
+  zoneMinutes: [number, number, number, number, number, number];
+  intervalRecoveries60: number[];
+  finalRank: number | null; // set by caller after sorting all members by uvScore
+  isPersonalBest: boolean;
+  proposedMhr: number | null; // set if peakHr > storedMhr this session — needs member confirmation
+}
+
+export interface AlertEvent {
+  memberId: string;
+  message: string;
+  severity: "info" | "warning" | "error";
+  code: string;
+}

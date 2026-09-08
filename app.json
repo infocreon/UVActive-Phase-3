@@ -1,0 +1,60 @@
+{
+  "expo": {
+    "name": "UV Active",
+    "slug": "uvactive-member",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#161312",
+    "icon": "./assets/icon.png",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#161312"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "in.uvactive.member",
+      "icon": "./assets/icon.png",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "in.uvactive.member",
+      "edgeToEdgeEnabled": false,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#161312"
+      },
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.POST_NOTIFICATIONS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-font",
+      "expo-secure-store",
+      "expo-sqlite",
+      "./plugins/with-abi-filters",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#E74A23"
+        }
+      ]
+    ],
+    "config": {},
+    "extra": {
+      "eas": {
+        "projectId": "REPLACE_WITH_NEW_EAS_PROJECT_ID"
+      }
+    }
+  }
+}
