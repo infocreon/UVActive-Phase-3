@@ -1,0 +1,82 @@
+{
+  "expo": {
+    "name": "UV Active Trainer",
+    "slug": "uvactive-trainer",
+    "version": "4.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#161312",
+    "icon": "./assets/icon.png",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#161312"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "in.uvactive.trainer",
+      "icon": "./assets/icon.png",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "UV Active needs Bluetooth to connect to Polar heart rate sensors and stream live data.",
+        "NSBluetoothPeripheralUsageDescription": "UV Active uses Bluetooth to read heart rate data from Polar sensors.",
+        "UIBackgroundModes": ["bluetooth-central"],
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "in.uvactive.trainer",
+      "versionCode": 4,
+      "edgeToEdgeEnabled": false,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#161312"
+      },
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.WAKE_LOCK",
+        "android.permission.POST_NOTIFICATIONS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-font",
+      "expo-secure-store",
+      "expo-sqlite",
+      "./plugins/with-abi-filters",
+      "./plugins/with-foreground-service",
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true,
+          "neverForLocation": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#E74A23"
+        }
+      ]
+    ],
+    "config": {},
+    "extra": {
+      "eas": {
+        "projectId": "REPLACE_WITH_NEW_EAS_PROJECT_ID"
+      }
+    }
+  }
+}
