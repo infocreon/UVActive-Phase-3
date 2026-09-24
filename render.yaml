@@ -1,0 +1,26 @@
+# Deploys the Admin Panel as a single Render static site.
+#
+# This app is a thin client — ALL of it talks to one shared backend,
+# `uvactive-unified-backend` (deployed separately, see that repo's own
+# README — DigitalOcean App Platform is the primary target, Render/
+# Railway/Fly/a bare Docker host all work too since it ships a
+# Dockerfile). There is no backend in this repo to deploy alongside it.
+#
+# Usage: Render dashboard → New → Blueprint → point at this repo, or
+# New → Static Site and fill in the same build command / publish path.
+
+services:
+  - type: web
+    name: uvactive-admin-panel
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      # URL of your uvactive-unified-backend deployment, including the
+      # /api/v1 prefix, e.g. https://api.uvactive.in/api/v1
+      - key: VITE_API_BASE_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
