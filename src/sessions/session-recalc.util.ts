@@ -159,7 +159,7 @@ export function recalcSessionMember(readings: RecalcReadingInput[], bio: RecalcM
     avgHr: Math.round(avgHr),
     maxHr,
     calories,
-    zoneSeconds,
+    zoneMinutes: { '1': zoneSeconds[1] / 60, '2': zoneSeconds[2] / 60, '3': zoneSeconds[3] / 60, '4': zoneSeconds[4] / 60, '5': zoneSeconds[5] / 60 },
     sweatPoints: sweatPointsRounded,
     recoveryPoints,
     recoveryGrade,

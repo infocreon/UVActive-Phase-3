@@ -424,10 +424,9 @@ export class SessionsService {
             avgHr: r.avgHr, maxHr: r.maxHr, calories: r.calories, zoneMinutes: r.zoneMinutes as any, score: r.score,
             // Rich post-workout summary (spec §7) — sent by the Trainer
             // App's formula engine alongside the core aggregates.
-        zoneSeconds: r.zoneSeconds,
-        sweatPoints: r.sweatPoints, recoveryPoints: r.recoveryPoints, recoveryGrade,
-        epocCalories: r.epocCalories, epocHours: r.epocHours, avgPctMhr: r.avgPctMhr, maxPctMhr: r.maxPctMhr,
-        finalRank: r.finalRank, consistencyPct: r.consistencyPct,
+            sweatPoints: r.sweatPoints, recoveryPoints: r.recoveryPoints, recoveryGrade,
+            epocCalories: r.epocCalories, epocHours: r.epocHours, avgPctMhr: r.avgPctMhr, maxPctMhr: r.maxPctMhr,
+            finalRank: r.finalRank, consistencyPct: r.consistencyPct,
             resultSubmittedAt: enrolled.resultSubmittedAt ?? new Date(),
             syncedAt: new Date(),
             attendance: enrolled.attendance === 'enrolled' ? 'attended' : enrolled.attendance,
@@ -872,9 +871,7 @@ export class SessionsService {
     if (!member) throw new NotFoundException('Member not found.');
 
     const everAtThisGym = member.currentGymId === gymId || (await this.prisma.memberGymHistory.findFirst({ where: { memberId, gymId } }));
-    if (!everAtThisGym) throw new NotFoundException('Member not found.');
-
-    return getMemberHistoryTicks(
+    if (!everAtThisGym) throw new NotFoundException('Member not found.');      return this.getMemberHistoryTicks(
       {
         sessionMemberFindMany: this.prisma.sessionMember.findMany.bind(this.prisma.sessionMember),
         sensorReadingFindMany: this.prisma.sensorReading.findMany.bind(this.prisma.sensorReading),
