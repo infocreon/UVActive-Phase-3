@@ -1,0 +1,192 @@
+# DigitalOcean App Platform spec for the consolidated UV Active stack.
+#
+# Shape: ONE backend service (Admin + Branch + Trainer + Member, via
+# SERVICE_SCOPE=all) + TWO static sites (Admin Panel, Branch Portal) +
+# ONE managed dev-tier Postgres.
+#
+# Sized here for the $5/mo tier (apps-s-1vcpu-0.5gb, 512MB RAM) — see
+# the backend's Dockerfile and README for what changed to make that fit
+# (prisma CLI moved to a real dependency instead of devDependency,
+# NODE_OPTIONS heap cap, unused ioredis dependency removed). 512MB for a
+# full NestJS + Prisma process is genuinely tight, not generous — if you
+# see OOM kills return under real traffic (many concurrent live
+# sessions, large member lists), instance_size_slug: apps-s-1vcpu-1gb
+# is the honest fix, not a further memory squeeze. Bump it before it
+# becomes an incident, not after.
+#
+# Deploy with: doctl apps create --spec infra/do-app-platform.yaml
+# (after pushing this repo, the admin-panel repo and branch-portal repo
+# to GitHub/GitLab — update the `repo:` fields below first).
+#
+# Trainer App and Member App are NOT part of this spec — they're Expo/
+# React Native mobile builds that call this backend's public URL
+# directly (see each app's .env — EXPO_PUBLIC_API_BASE_URL /
+# API_BASE_URL), they don't deploy to App Platform.
+#
+# Note for the two static_sites below: they are NOT web services and
+# are not subject to this instance-size discussion at all — DO serves
+# static-site output straight from its own CDN/edge layer, with no
+# persistent Node process and no runtime RAM to size. Their build step
+# also runs on DO's shared build fleet, independent of whatever
+# instance_size_slug you pick for the backend service.
+
+name: uvactive
+region: nyc
+
+databases:
+  - name: uvactive-db
+    engine: PG
+    version: "16"
+    production: false # dev tier for the initial single-instance rollout — see note below
+    # NOTE: "production: false" gives DO's smallest managed Postgres
+    # tier (shared CPU, 1GB), which is fine for the testing/first-
+    # release phase this spec targets. Flip to true (and pick a sized
+    # plan) once member/session volume and backup requirements are
+    # confirmed — the architecture doc explicitly calls out expanding
+    # hosting as active users, retained sensor data and backups grow.
+
+services:
+  - name: backend
+    github:
+      repo: your-org/uvactive-unified-backend # <-- update
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: Dockerfile
+    source_dir: /
+    http_port: 8080
+    instance_count: 1 # single instance by design — see ARCHITECTURE.md
+    instance_size_slug: apps-s-1vcpu-0.5gb # 1 vCPU / 512MB — the $5/mo tier, see note above
+    health_check:
+      http_path: /api/v1/health
+      initial_delay_seconds: 20
+      period_seconds: 15
+      timeout_seconds: 5
+      failure_threshold: 3
+    routes:
+      - path: /api
+    envs:
+      - key: NODE_ENV
+        value: production
+      - key: SERVICE_SCOPE
+        value: all
+      - key: DATABASE_URL
+        # connection_limit=3 keeps Prisma's pool small on purpose — the
+        # default (physical_cpus*2+1) is fine on a bigger box, but on
+        # 1 vCPU/512MB every extra pooled connection is memory you don't
+        # have to spare. 3 is enough for a single-instance deployment;
+        # raise it only alongside instance_count or instance_size_slug.
+        #
+        # Uses "&", not "?" — DO's managed Postgres connection strings
+        # already include "?sslmode=require", so a second "?" here would
+        # produce an invalid URL. If you swap in a different Postgres
+        # provider whose DATABASE_URL has no query string at all, change
+        # this back to "?connection_limit=3&pool_timeout=10".
+        value: ${uvactive-db.DATABASE_URL}&connection_limit=3&pool_timeout=10
+        scope: RUN_TIME
+      - key: JWT_MEMBER_SECRET
+        type: SECRET
+        scope: RUN_TIME
+      - key: JWT_STAFF_SECRET
+        type: SECRET
+        scope: RUN_TIME
+      - key: JWT_ADMIN_SECRET
+        type: SECRET
+        scope: RUN_TIME
+      - key: GOOGLE_STAFF_CLIENT_ID
+        scope: RUN_TIME
+      - key: EXPO_PUSH_ACCESS_TOKEN
+        type: SECRET
+        scope: RUN_TIME
+      - key: SMS_PROVIDER_API_KEY
+        type: SECRET
+        scope: RUN_TIME
+      - key: RESEND_API_KEY
+        type: SECRET
+        scope: RUN_TIME
+      - key: RESEND_FROM_EMAIL
+        scope: RUN_TIME
+      - key: TOTP_ISSUER
+        value: "UVActive"
+      - key: EMAIL_LOGO_URL
+        scope: RUN_TIME
+      - key: GOOGLE_STAFF_CLIENT_ID
+        scope: RUN_TIME
+      # Object storage (member/trainer profile photo uploads — see
+      # src/uploads). Leave the four secrets unset to launch without
+      # photo uploads: UploadsService returns a clean 503
+      # STORAGE_NOT_CONFIGURED instead of failing to boot. Works with
+      # DigitalOcean Spaces (recommended — same-region, no egress
+      # charges from this app), AWS S3, or Cloudflare R2.
+      - key: S3_BUCKET
+        scope: RUN_TIME
+      - key: S3_ACCESS_KEY
+        type: SECRET
+        scope: RUN_TIME
+      - key: S3_SECRET_KEY
+        type: SECRET
+        scope: RUN_TIME
+      - key: S3_ENDPOINT
+        # DigitalOcean Spaces example: https://nyc3.digitaloceanspaces.com
+        scope: RUN_TIME
+      - key: S3_REGION
+        # DigitalOcean Spaces example: nyc3
+        scope: RUN_TIME
+      - key: ACCESS_TOKEN_TTL_MEMBER_MIN
+        value: "60"
+      - key: ACCESS_TOKEN_TTL_STAFF_MIN
+        value: "15"
+      - key: ACCESS_TOKEN_TTL_ADMIN_MIN
+        value: "15"
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: "30"
+      - key: CORS_ORIGINS
+        # Explicit origins, not "*" — the doc's own "Standardize
+        # deployment" step calls for explicit CORS. Update to the real
+        # static-site URLs DO assigns below (or your custom domains).
+        value: "https://uvactive-admin.ondigitalocean.app,https://uvactive-branch.ondigitalocean.app"
+        scope: RUN_TIME
+      - key: GRAPH_MAX_GAP_MS
+        value: "15000"
+      - key: GRAPH_MIN_DELTA_BPM
+        value: "4"
+      - key: GRAPH_MAX_CHART_POINTS
+        value: "400"
+      - key: RAW_READING_RETENTION_DAYS
+        value: "14"
+      # No REDIS_URL, no managed Redis add-on: rate limiting is
+      # Postgres-backed (see src/common/utils/pg-rate-limit.util.ts) and
+      # rides on the same `uvactive-db` above, so it's already correct
+      # if instance_count is raised past 1 later — nothing to add here.
+
+static_sites:
+  - name: admin-panel
+    github:
+      repo: your-org/uvactive-admin-panel # <-- update
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    build_command: npm run build
+    output_dir: dist
+    routes:
+      - path: /admin-panel
+    envs:
+      - key: VITE_API_BASE_URL
+        value: ${backend.PUBLIC_URL}/api/v1
+      - key: VITE_GOOGLE_STAFF_CLIENT_ID
+        scope: BUILD_TIME
+
+  - name: branch-portal
+    github:
+      repo: your-org/uvactive-branch-portal # <-- update
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    build_command: npm run build
+    output_dir: dist
+    routes:
+      - path: /branch-portal
+    envs:
+      - key: VITE_API_BASE_URL
+        value: ${backend.PUBLIC_URL}/api/v1
+      - key: VITE_GOOGLE_STAFF_CLIENT_ID
+        scope: BUILD_TIME
