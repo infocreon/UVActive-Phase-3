@@ -882,7 +882,7 @@ export class SessionsService {
             session: { id: string; name: string; createdAt: Date; updatedAt: Date; status: string; gymId: string; trainerId: string; capacity: number; startedAt: Date | null; endedAt: Date | null; scheduledAt: Date | null; needsReassignment: boolean; resultSubmittedAt: Date | null; syncedAt: Date | null; enrolledBy: string; attendance: string; avgHr: number | null; maxHr: number | null; calories: number | null; zoneMinutes: unknown; score: number | null; sweatPoints: number | null; recoveryPoints: number | null; recoveryGrade: string | null; epocCalories: number | null; epocHours: number | null; avgPctMhr: number | null; maxPctMhr: number | null; finalRank: number | null; consistencyPct: number | null; outOfRank: boolean; notificationSentAt: Date | null; };
           }>>,
         sensorReadingFindMany: (args) =>
-          this.prisma.sensorReading.findMany(args) as Promise<Array<{ ts: Date; hr: number }>>,
+          this.prisma.sensorReading.findMany(args) as unknown as Promise<Array<{ ts: Date; hr: number }>>,
       },
       memberId,
       gymId,
