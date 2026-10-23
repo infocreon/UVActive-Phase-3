@@ -9,6 +9,7 @@ import { CreateSessionDto, EndSessionDto } from './sessions.dto';
 import { zoneForBpm } from '../common/hr.util';
 import { recalcSessionMember } from './session-recalc.util';
 import { buildChartSeries, ChartSeries } from './chart-downsample.util';
+import { getMemberHistoryTicks } from './member-history-ticks.util';
 import { Prisma } from '@prisma/client';
 
 // How long a completed session's raw sensor_readings rows stick around
@@ -865,13 +866,14 @@ export class SessionsService {
   /**
    * Cross-session HR tick history for the Trainer App's member-history curve.
    * Gym-scoped: a trainer can only pull ticks for sessions at their own branch.
-   */
-  async getMemberHistoryTicks(memberId: string, gymId: string) {
+   */  async getMemberHistoryTicks(memberId: string, gymId: string) {
     const member = await this.prisma.member.findUnique({ where: { id: memberId } });
     if (!member) throw new NotFoundException('Member not found.');
 
     const everAtThisGym = member.currentGymId === gymId || (await this.prisma.memberGymHistory.findFirst({ where: { memberId, gymId } }));
-    if (!everAtThisGym) throw new NotFoundException('Member not found.');      return this.getMemberHistoryTicks(
+    if (!everAtThisGym) throw new NotFoundException('Member not found.');
+
+    return getMemberHistoryTicks(
       {
         sessionMemberFindMany: this.prisma.sessionMember.findMany.bind(this.prisma.sessionMember),
         sensorReadingFindMany: this.prisma.sensorReading.findMany.bind(this.prisma.sensorReading),

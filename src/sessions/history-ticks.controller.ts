@@ -1,6 +1,7 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Auth, AuthenticatedUser } from '../common/decorators/auth.decorator';
+import { Auth, CurrentUser } from '../common/decorators/auth.decorator';
+import { AuthenticatedUser } from '../common/decorators/auth.decorator';
 import { SessionsService } from './sessions.service';
 
 // ── Trainer App — member cross-session HR history ──────────────────────
@@ -13,12 +14,12 @@ export class TrainerMemberHistoryController {
   constructor(private readonly sessions: SessionsService) {}
 
   @Get(':memberId/history-ticks')
-  getMemberHistoryTicks(@Param('memberId') memberId: string, @AuthenticatedUser() user: AuthenticatedUser) {
+  getMemberHistoryTicks(@Param('memberId') memberId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.sessions.getMemberHistoryTicks(memberId, user.gymId!);
   }
 
   @Get(':memberId/hr-ticks')
-  getMemberHrTicks(@Param('memberId') memberId: string, @AuthenticatedUser() user: AuthenticatedUser) {
+  getMemberHrTicks(@Param('memberId') memberId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.sessions.getMemberHistoryTicks(memberId, user.gymId!);
   }
 }
