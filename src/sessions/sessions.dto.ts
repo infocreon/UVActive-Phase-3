@@ -80,6 +80,14 @@ export class EndSessionDto {
   // client-side clock at all — SessionsService.end() falls back to
   // `ended_at - started_at` in both cases.
   @IsOptional() @IsInt() @Min(0) durationSeconds?: number;
+
+  // The phone's own real start / end instants. The end request can
+  // reach the cloud minutes or days after the trainer pressed End (the
+  // offline outbox), so without these the cloud stamped "now" as the
+  // session's start/end and history showed the wrong day/time. Optional:
+  // older app builds and the Branch Portal don't send them.
+  @EmptyToUndefined() @IsOptional() @IsDateString() startedAt?: string;
+  @EmptyToUndefined() @IsOptional() @IsDateString() endedAt?: string;
 }
 
 export class SensorReadingDto {

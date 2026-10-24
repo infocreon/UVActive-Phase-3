@@ -46,21 +46,43 @@ describe('Idempotent session-end (spec §7, §13 / §17 checklist)', () => {
     expect(finalSession?.status).toBe('completed');
   });
 
-  it('rejects a result for a member who was never enrolled', async () => {
+  it('stores a result for a same-gym member whose enroll request was lost (no data thrown away)', async () => {
     const { gym, trainer } = await seedGymWithTrainer(prisma);
-    const { member: notEnrolled } = await seedMember(prisma, gym.id);
+    const { member } = await seedMember(prisma, gym.id);
+    const session = await prisma.session.create({ data: { gymId: gym.id, trainerId: trainer.id, name: 'Class', capacity: 10 } });
+    await sessions.start(session.id, trainer.id);
+
+    await sessions.end(session.id, { results: [{ memberId: member.id, avgHr: 120, score: 70 }] }, trainer.id);
+
+    const row = await prisma.sessionMember.findUnique({ where: { sessionId_memberId: { sessionId: session.id, memberId: member.id } } });
+    expect(row?.avgHr).toBe(120);
+    expect(row?.score).toBe(70);
+  });
+
+  it('still rejects a result for a member who does not belong to the session\'s branch', async () => {
+    const { gym, trainer } = await seedGymWithTrainer(prisma);
+    const { gym: otherGym } = await seedGymWithTrainer(prisma);
+    const { member: outsider } = await seedMember(prisma, otherGym.id);
     const session = await prisma.session.create({ data: { gymId: gym.id, trainerId: trainer.id, name: 'Class', capacity: 10 } });
     await sessions.start(session.id, trainer.id);
 
     await expect(
-      sessions.end(session.id, { results: [{ memberId: notEnrolled.id, avgHr: 120 }] }, trainer.id),
-    ).rejects.toThrow(/never enrolled/);
+      sessions.end(session.id, { results: [{ memberId: outsider.id, avgHr: 120 }] }, trainer.id),
+    ).rejects.toThrow(/does not belong/);
   });
 
-  it('rejects ending a session that was never started', async () => {
+  it('ends a never-started (offline) session by starting it implicitly, keeping the phone\'s real times', async () => {
     const { gym, trainer } = await seedGymWithTrainer(prisma);
     const session = await prisma.session.create({ data: { gymId: gym.id, trainerId: trainer.id, name: 'Class', capacity: 10 } });
+    const startedAt = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+    const endedAt = new Date(Date.now() - 3 * 24 * 3600 * 1000 + 45 * 60 * 1000).toISOString();
 
-    await expect(sessions.end(session.id, { results: [] }, trainer.id)).rejects.toThrow(/never started/);
+    await sessions.end(session.id, { results: [], startedAt, endedAt, durationSeconds: 2700 }, trainer.id);
+
+    const final = await prisma.session.findUnique({ where: { id: session.id } });
+    expect(final?.status).toBe('completed');
+    expect(final?.startedAt?.toISOString()).toBe(startedAt);
+    expect(final?.endedAt?.toISOString()).toBe(endedAt);
+    expect(final?.durationSeconds).toBe(2700);
   });
 });

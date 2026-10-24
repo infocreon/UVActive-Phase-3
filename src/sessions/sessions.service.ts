@@ -150,8 +150,73 @@ export class SessionsService {
     });
   }
 
+  /**
+   * The Trainer App's session list / History tab. Includes every
+   * enrolled member with their stored results so a freshly-installed
+   * phone (empty local SQLite) can render the full history — winner,
+   * member count, per-member stats — straight from this one response,
+   * with no dependency on anything the previous phone had on disk.
+   * `chartSeries` (the BPM graph blob) is deliberately NOT selected:
+   * it is large and has its own endpoint.
+   */
   listForTrainer(trainerId: string) {
-    return this.prisma.session.findMany({ where: { trainerId }, orderBy: { scheduledAt: 'desc' }, include: { _count: { select: { members: true } } } });
+    return this.prisma.session.findMany({
+      where: { trainerId },
+      // Newest first; sessions started ad hoc have no scheduledAt, so
+      // fall back to createdAt as the secondary key instead of letting
+      // Postgres float NULLs to the top of the list.
+      orderBy: [{ scheduledAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+      include: {
+        trainer: { select: { id: true, name: true } },
+        _count: { select: { members: true } },
+        members: {
+          select: {
+            id: true, sessionId: true, memberId: true, attendance: true,
+            avgHr: true, maxHr: true, calories: true, score: true, zoneMinutes: true,
+            sweatPoints: true, recoveryPoints: true, recoveryGrade: true,
+            epocCalories: true, epocHours: true, avgPctMhr: true, maxPctMhr: true,
+            finalRank: true, consistencyPct: true, resultSubmittedAt: true,
+            member: { select: { id: true, name: true, memberCode: true } },
+          },
+        },
+      },
+    });
+  }
+
+  /**
+   * Makes sure every memberId has a session_members row. Used by the
+   * upload paths (readings + end), which previously REJECTED data for a
+   * member the cloud didn't know was enrolled. That rejection is what
+   * silently threw away a whole session's results: a trainer-side
+   * enrollment can legitimately fail at sync time (capacity is the gym's
+   * sensor count, but a class can run with sensor-less members; or the
+   * enroll request was lost) while the workout itself really happened and
+   * was recorded on the phone. The data is a fact, not a booking request —
+   * so it's stored, as long as the member genuinely belongs (or belonged)
+   * to this session's gym. Capacity is intentionally not checked here.
+   */
+  private async ensureEnrolled(sessionId: string, gymId: string, memberIds: string[]): Promise<void> {
+    const unique = [...new Set(memberIds)];
+    if (unique.length === 0) return;
+    const existing = await this.prisma.sessionMember.findMany({
+      where: { sessionId, memberId: { in: unique } },
+      select: { memberId: true },
+    });
+    const have = new Set(existing.map((e) => e.memberId));
+    const missing = unique.filter((id) => !have.has(id));
+    if (missing.length === 0) return;
+
+    const [current, history] = await Promise.all([
+      this.prisma.member.findMany({ where: { id: { in: missing }, currentGymId: gymId }, select: { id: true } }),
+      this.prisma.memberGymHistory.findMany({ where: { memberId: { in: missing }, gymId }, select: { memberId: true } }),
+    ]);
+    const belongs = new Set([...current.map((m) => m.id), ...history.map((h) => h.memberId)]);
+    const allowed = missing.filter((id) => belongs.has(id));
+    if (allowed.length === 0) return;
+    await this.prisma.sessionMember.createMany({
+      data: allowed.map((memberId) => ({ sessionId, memberId, enrolledBy: 'trainer' })),
+      skipDuplicates: true,
+    });
   }
 
   // `gymId` is optional, same parity gap as MembersService.listAll —
@@ -276,6 +341,15 @@ export class SessionsService {
       if (session.status === 'completed' || session.status === 'cancelled') {
         throw new BadRequestException(`Cannot add a member to a ${session.status} session.`);
       }
+      // Self-booking only while the session is still upcoming — the Book
+      // screen only lists these, but the endpoint itself must enforce it
+      // (a stale list or a direct call could otherwise join a live class).
+      if (
+        enrolledBy === 'member_self_book' &&
+        (session.status !== 'scheduled' || (session.scheduled_at && session.scheduled_at.getTime() <= Date.now()))
+      ) {
+        throw new AppException('BOOKING_CLOSED', 'Booking has closed for this session.', 409);
+      }
 
       const member = await tx.member.findUnique({ where: { id: memberId } });
       if (!member) throw new NotFoundException('Member not found.');
@@ -396,13 +470,30 @@ export class SessionsService {
    */
   async end(sessionId: string, dto: EndSessionDto, trainerId: string) {
     const session = await this.assertOwnedByTrainer(sessionId, trainerId);
-    if (session.status === 'scheduled') throw new BadRequestException('Cannot end a session that was never started.');
+    // A cancelled session can't be revived by a late upload.
+    if (session.status === 'cancelled') throw new BadRequestException('Cannot end a cancelled session.');
+
+    // Offline-first reality: the phone already RAN this session. Its
+    // `session_start` request may have been rejected or lost (clock skew
+    // vs. the scheduled time, app killed mid-request), which used to turn
+    // the later end into "Cannot end a session that was never started" and
+    // discard every member's results. The end payload is the proof the
+    // session happened, so a still-scheduled session is started
+    // implicitly — at the phone's own start instant when it sent one.
+    const startedAtFromClient = dto.startedAt ? new Date(dto.startedAt) : undefined;
+    const endedAtFromClient = dto.endedAt ? new Date(dto.endedAt) : undefined;
+
+    // Results for members the cloud never recorded as enrolled are stored,
+    // not rejected — see ensureEnrolled().
+    await this.ensureEnrolled(sessionId, session.gymId, dto.results.map((r) => r.memberId));
 
     await this.prisma.$transaction(async (tx) => {
       for (const r of dto.results) {
         const enrolled = await tx.sessionMember.findUnique({ where: { sessionId_memberId: { sessionId, memberId: r.memberId } } });
         if (!enrolled) {
-          throw new BadRequestException(`Member ${r.memberId} was never enrolled in this session — cannot submit a result for them.`);
+          // Only reachable for a member who isn't (and never was) part of
+          // this gym — genuinely invalid, unlike a lost enroll request.
+          throw new BadRequestException(`Member ${r.memberId} does not belong to this session's branch — cannot submit a result for them.`);
         }
         // Stamp the recovery grade server-side when a client sent
         // recoveryPoints without one (an older app build, or any
@@ -434,8 +525,15 @@ export class SessionsService {
           },
         });
       }
+      if (session.status === 'scheduled') {
+        // Implicit start (see above).
+        await tx.session.update({
+          where: { id: sessionId },
+          data: { status: 'in_progress', startedAt: startedAtFromClient ?? session.startedAt ?? new Date() },
+        });
+      }
       if (session.status !== 'completed') {
-        const endedAt = new Date();
+        const endedAt = endedAtFromClient ?? new Date();
         // Duration: prefer the Trainer App's own wall-clock measurement
         // (dto.durationSeconds — it knows when the trainer actually
         // pressed End, which can be minutes before this queued payload
@@ -443,19 +541,27 @@ export class SessionsService {
         // client that doesn't send one (Branch Portal end, old app
         // build). This was previously never written at all, which left
         // every non-Trainer-App client with no duration to display.
+        const effectiveStart = startedAtFromClient ?? session.startedAt ?? undefined;
         const durationSeconds =
           dto.durationSeconds ??
-          (session.startedAt
-            ? Math.max(0, Math.round((endedAt.getTime() - session.startedAt.getTime()) / 1000))
+          (effectiveStart
+            ? Math.max(0, Math.round((endedAt.getTime() - effectiveStart.getTime()) / 1000))
             : undefined);
         await tx.session.update({
           where: { id: sessionId },
           data: {
             status: 'completed',
             endedAt,
+            // Keep the phone's real start instant when the cloud never
+            // recorded one (or recorded a later, upload-time stamp).
+            ...(startedAtFromClient ? { startedAt: startedAtFromClient } : {}),
             ...(durationSeconds != null ? { durationSeconds } : {}),
           },
         });
+      } else if (dto.durationSeconds != null && session.durationSeconds == null) {
+        // Re-upload of an already-completed session (the "re-send all
+        // history" path): backfill a duration the first upload lacked.
+        await tx.session.update({ where: { id: sessionId }, data: { durationSeconds: dto.durationSeconds } });
       }
     });
 
@@ -471,8 +577,13 @@ export class SessionsService {
 
     await this.auditLog.record({ actorType: 'staff', actorId: trainerId, action: 'session.end', targetType: 'session', targetId: sessionId, payload: { resultCount: dto.results.length } });
 
-    for (const r of dto.results) {
-      await this.notifications.notify({ recipientType: 'member', recipientId: r.memberId, type: 'result_ready', body: 'Your session results are ready.' });
+    // Only the FIRST upload announces results — a re-upload of an
+    // already-completed session (history re-send) must not ping every
+    // member again.
+    if (session.status !== 'completed') {
+      for (const r of dto.results) {
+        await this.notifications.notify({ recipientType: 'member', recipientId: r.memberId, type: 'result_ready', body: 'Your session results are ready.' });
+      }
     }
     return this.getById(sessionId);
   }
@@ -516,12 +627,19 @@ export class SessionsService {
   }
 
   // ── Member-facing ────────────────────────────────────────────────────
-  listForMember(memberId: string) {
-    return this.prisma.sessionMember.findMany({
+  /** The graph blob is large and has its own endpoint — never ship it inside list/detail rows. */
+  private stripChartSeries<T extends { chartSeries?: unknown }>(row: T): Omit<T, 'chartSeries'> {
+    const { chartSeries: _omit, ...rest } = row;
+    return rest;
+  }
+
+  async listForMember(memberId: string) {
+    const rows = await this.prisma.sessionMember.findMany({
       where: { memberId },
       include: { session: { include: { gym: { select: { name: true } }, trainer: { select: { name: true } } } } },
       orderBy: { enrolledAt: 'desc' },
     });
+    return rows.map((r) => this.stripChartSeries(r));
   }
 
   /**
@@ -562,7 +680,11 @@ export class SessionsService {
       include: { session: { include: { gym: { select: { name: true } }, trainer: { select: { name: true } } } } },
     });
     if (!sessionMember) throw new NotFoundException('Session not found for this member.');
-    return sessionMember;
+    // "Rank #3 of 12" — everyone in this session with a recorded result.
+    const participantCount = await this.prisma.sessionMember.count({
+      where: { sessionId, OR: [{ resultSubmittedAt: { not: null } }, { score: { not: null } }] },
+    });
+    return { ...this.stripChartSeries(sessionMember), participantCount };
   }
 
   // Same BPM-tick drill-down as getAthleteTicks (Branch Portal), but
@@ -600,30 +722,67 @@ export class SessionsService {
    * nothing but the detailed graph.
    */
   async ingestReadings(sessionId: string, readings: { memberId: string; ts: string; hr: number; rrMs?: number; interpolated?: boolean }[], trainerId: string) {
-    await this.assertOwnedByTrainer(sessionId, trainerId);
+    const session = await this.assertOwnedByTrainer(sessionId, trainerId);
 
-    // Resolve each memberId to its session_members row up front so a
-    // reading for a member never enrolled in this session is rejected
-    // outright, same posture as end()'s validation.
+    // A reading for a member the cloud doesn't list as enrolled used to be
+    // rejected outright — and because the phone retries the identical batch
+    // forever, one lost enroll request wedged ALL tick uploads. Store it
+    // instead (same gym check as end()) — see ensureEnrolled().
+    await this.ensureEnrolled(sessionId, session.gymId, readings.map((r) => r.memberId));
+
     const memberIds = [...new Set(readings.map((r) => r.memberId))];
     const enrolledRows = await this.prisma.sessionMember.findMany({ where: { sessionId, memberId: { in: memberIds } } });
     const bySessionMemberId = new Map(enrolledRows.map((row) => [row.memberId, row.id]));
 
     const missing = memberIds.filter((id) => !bySessionMemberId.has(id));
     if (missing.length > 0) {
-      throw new BadRequestException(`Member(s) not enrolled in this session, cannot record readings: ${missing.join(', ')}`);
+      throw new BadRequestException(`Member(s) not part of this branch, cannot record readings: ${missing.join(', ')}`);
     }
 
-    await this.prisma.sensorReading.createMany({
-      data: readings.map((r) => ({
-        sessionMemberId: bySessionMemberId.get(r.memberId)!,
-        ts: new Date(r.ts),
-        hr: r.hr,
-        rrMs: r.rrMs,
-        interpolated: r.interpolated ?? false,
-      })),
-    });
-    return { ok: true, count: readings.length };
+    // Idempotent: the phone retries a batch whose response it never saw,
+    // and the "re-upload all history" action re-sends everything. Skip any
+    // (member, timestamp) pair already stored so a replay can never double
+    // the log (which would skew every recalculated score and the graph).
+    const sessionMemberIds = [...new Set(bySessionMemberId.values())];
+    const times = readings.map((r) => new Date(r.ts).getTime()).filter((t) => Number.isFinite(t));
+    let fresh = readings;
+    if (times.length > 0) {
+      const existing = await this.prisma.sensorReading.findMany({
+        where: {
+          sessionMemberId: { in: sessionMemberIds },
+          ts: { gte: new Date(Math.min(...times)), lte: new Date(Math.max(...times)) },
+        },
+        select: { sessionMemberId: true, ts: true },
+      });
+      const seen = new Set(existing.map((e) => `${e.sessionMemberId}|${e.ts.getTime()}`));
+      fresh = readings.filter((r) => !seen.has(`${bySessionMemberId.get(r.memberId)}|${new Date(r.ts).getTime()}`));
+    }
+
+    if (fresh.length > 0) {
+      await this.prisma.sensorReading.createMany({
+        data: fresh.map((r) => ({
+          sessionMemberId: bySessionMemberId.get(r.memberId)!,
+          ts: new Date(r.ts),
+          hr: r.hr,
+          rrMs: r.rrMs,
+          interpolated: r.interpolated ?? false,
+        })),
+      });
+      // Late ticks (offline catch-up, re-upload) change what the graph
+      // should show — drop the cached downsample so the next read rebuilds
+      // it from the complete log instead of serving a stale partial series.
+      // Only while the raw log is still complete (inside the retention
+      // window): past it the purge job has deleted most raw rows, and
+      // rebuilding from a partial re-upload would REPLACE a good series
+      // with a worse one.
+      const retentionDays = this.config.get<number>('graphEngine.rawRetentionDays') ?? RAW_READING_RETENTION_DAYS;
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+      await this.prisma.sessionMember.updateMany({
+        where: { id: { in: sessionMemberIds }, session: { status: 'completed', endedAt: { gte: cutoff } } },
+        data: { chartSeries: Prisma.DbNull },
+      });
+    }
+    return { ok: true, count: readings.length, stored: fresh.length };
   }
 
   /**
