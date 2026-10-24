@@ -24,6 +24,13 @@ import { Prisma } from '@prisma/client';
 // doesn't break.
 export const RAW_READING_RETENTION_DAYS = 14;
 
+// How long a session with real sensor readings must have been silent
+// before reconcileAbandonedSessions() treats it as finished rather than
+// live. Generous on purpose: a trainer may pause the app for hours and
+// resume the same session, and a false auto-close would end a workout
+// that is still running.
+const ABANDONED_SESSION_GRACE_MS = 6 * 60 * 60 * 1000;
+
 @Injectable()
 export class SessionsService {
   constructor(
@@ -750,6 +757,28 @@ export class SessionsService {
     // instead (same gym check as end()) — see ensureEnrolled().
     await this.ensureEnrolled(sessionId, session.gymId, readings.map((r) => r.memberId));
 
+    // Sensor data only comes from a session engine that is actually
+    // running, so it is proof the session started. A lost/rejected
+    // `session_start` (the start-time gate rejects clock-skewed starts,
+    // and a killed app never retries) used to leave the cloud row as
+    // `scheduled` while its telemetry streamed in — which is exactly what
+    // made a finished workout show up under "Scheduled" on another
+    // device instead of in past history. Flip it here, and seed the real
+    // start instant from the first reading when the cloud never had one.
+    if (session.status === 'scheduled' && readings.length > 0) {
+      const times = readings
+        .map((r) => new Date(r.ts).getTime())
+        .filter((t) => Number.isFinite(t));
+      const firstTs = times.length > 0 ? new Date(Math.min(...times)) : new Date();
+      await this.prisma.session.update({
+        where: { id: sessionId },
+        data: {
+          status: 'in_progress',
+          ...(session.startedAt ? {} : { startedAt: firstTs }),
+        },
+      });
+    }
+
     const memberIds = [...new Set(readings.map((r) => r.memberId))];
     const enrolledRows = await this.prisma.sessionMember.findMany({ where: { sessionId, memberId: { in: memberIds } } });
     const bySessionMemberId = new Map(enrolledRows.map((row) => [row.memberId, row.id]));
@@ -994,6 +1023,108 @@ export class SessionsService {
       }
     }
     return overdue.length;
+  }
+
+  /**
+   * Closes sessions that were really run but never got an end request.
+   *
+   * Offline-first reality: the phone's `session_end` can be lost entirely
+   * (app killed after the workout, outbox row never written, device wiped)
+   * while the sensor readings kept uploading — so the cloud ends up with a
+   * `scheduled`/`in_progress` session full of real telemetry and no results
+   * whatsoever. Every other device then shows that session under the
+   * trainer's schedule instead of past history, with an empty leaderboard,
+   * forever.
+   *
+   * The readings themselves are proof the session happened, so this uses
+   * them as the authoritative clock: first reading = startedAt, last
+   * reading = endedAt, then the normal recalculate + re-rank pass writes
+   * every member's Avg/Peak/Calories/Zones/Sweat/Recovery/EPOC/%MHR from
+   * that same log. Runs only for sessions whose last reading is older than
+   * ABANDONED_SESSION_GRACE_MS, so a session that is still live (or was
+   * briefly interrupted) is never touched.
+   */
+  async reconcileAbandonedSessions(limit = 200): Promise<{ closed: number; sessions: string[] }> {
+    const cutoff = new Date(Date.now() - ABANDONED_SESSION_GRACE_MS);
+    const open = await this.prisma.session.findMany({
+      where: {
+        status: { in: ['scheduled', 'in_progress'] },
+        members: { some: { readings: { some: { ts: { lt: cutoff } } } } },
+      },
+      select: { id: true, name: true },
+      take: limit,
+    });
+
+    const closed: string[] = [];
+    for (const candidate of open) {
+      const [first, last] = await Promise.all([
+        this.prisma.sensorReading.findFirst({
+          where: { sessionMember: { sessionId: candidate.id } },
+          orderBy: { ts: 'asc' },
+          select: { ts: true },
+        }),
+        this.prisma.sensorReading.findFirst({
+          where: { sessionMember: { sessionId: candidate.id } },
+          orderBy: { ts: 'desc' },
+          select: { ts: true },
+        }),
+      ]);
+      // Re-check against the cutoff: the session may have received fresh
+      // readings between the query above and this read (still live).
+      if (!first || !last || last.ts > cutoff) continue;
+
+      await this.prisma.session.update({
+        where: { id: candidate.id },
+        data: {
+          status: 'completed',
+          startedAt: first.ts,
+          endedAt: last.ts,
+          durationSeconds: Math.max(0, Math.round((last.ts.getTime() - first.ts.getTime()) / 1000)),
+        },
+      });
+
+      // Rebuild every member's chart + rich result fields from the
+      // readings that DID reach the cloud, then rank the leaderboard.
+      const members = await this.prisma.sessionMember.findMany({
+        where: { sessionId: candidate.id },
+        select: { memberId: true },
+      });
+      for (const m of members) {
+        try {
+          await this.recalculateMember(candidate.id, m.memberId);
+        } catch (e) {
+          // One member's bad data must never stop the rest of the session
+          // from being repaired — same posture as backfillResults().
+        }
+      }
+
+      const ranked = await this.prisma.sessionMember.findMany({
+        where: { sessionId: candidate.id },
+        orderBy: [{ score: 'desc' }],
+      });
+      if (ranked.length > 0) {
+        await this.prisma.$transaction(
+          ranked.map((r, i) =>
+            this.prisma.sessionMember.update({
+              where: { id: r.id },
+              data: { finalRank: r.score != null ? i + 1 : null },
+            }),
+          ),
+        );
+      }
+
+      await this.auditLog.record({
+        actorType: 'system',
+        actorId: 'session-reconcile',
+        action: 'session.auto_close',
+        targetType: 'session',
+        targetId: candidate.id,
+        payload: { name: candidate.name, firstReading: first.ts, lastReading: last.ts, members: members.length },
+      });
+      closed.push(candidate.id);
+    }
+
+    return { closed: closed.length, sessions: closed };
   }
 
   /**
