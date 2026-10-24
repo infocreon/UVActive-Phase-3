@@ -867,24 +867,34 @@ export class SessionsService {
       return { recalculated: false, reason: 'No sensor readings stored for this member in this session.', sessionMemberId: sessionMember.id };
     }
 
+    // A submitted result was computed on the phone from the FULL-rate tick
+    // stream; this pass reconstructs from whatever log reached the cloud
+    // (downsampled, and possibly partial). So for a row that already has a
+    // submitted result it may fill blanks but must never replace a value
+    // that is already there — and for every row it must never write null
+    // over an existing value, which is what wiped real Recovery Points on
+    // the app's hourly recalculate sweep.
+    const submitted = sessionMember.resultSubmittedAt != null;
+    const pick = <T>(derived: T | null, existing: T | null): T | null =>
+      submitted ? (existing ?? derived) : (derived ?? existing);
+
     await this.prisma.sessionMember.update({
       where: { id: sessionMember.id },
       data: {
-        avgHr: result.avgHr,
-        maxHr: result.maxHr,
+        avgHr: pick(result.avgHr, sessionMember.avgHr),
+        maxHr: pick(result.maxHr, sessionMember.maxHr),
         // Never clobber a calorie figure the Trainer App already sent
-        // just because bio data is missing for this recompute — only
-        // overwrite when we actually derived a fresh value.
-        ...(result.calories != null ? { calories: result.calories } : {}),
-        zoneMinutes: result.zoneMinutes as any,
-        sweatPoints: result.sweatPoints,
-        recoveryPoints: result.recoveryPoints,
-        recoveryGrade: result.recoveryGrade,
-        epocCalories: result.epocCalories,
-        epocHours: result.epocHours,
-        avgPctMhr: result.avgPctMhr,
-        maxPctMhr: result.maxPctMhr,
-        score: result.score,
+        // just because bio data is missing for this recompute.
+        calories: pick(result.calories, sessionMember.calories),
+        zoneMinutes: (result.zoneMinutes ?? sessionMember.zoneMinutes) as any,
+        sweatPoints: pick(result.sweatPoints, sessionMember.sweatPoints),
+        recoveryPoints: pick(result.recoveryPoints, sessionMember.recoveryPoints),
+        recoveryGrade: pick(result.recoveryGrade, sessionMember.recoveryGrade),
+        epocCalories: pick(result.epocCalories, sessionMember.epocCalories),
+        epocHours: pick(result.epocHours, sessionMember.epocHours),
+        avgPctMhr: pick(result.avgPctMhr, sessionMember.avgPctMhr),
+        maxPctMhr: pick(result.maxPctMhr, sessionMember.maxPctMhr),
+        score: pick(result.score, sessionMember.score),
         syncedAt: new Date(),
       },
     });
@@ -911,10 +921,7 @@ export class SessionsService {
 
     // Re-rank by refreshed UV score, highest first — mirrors the
     // Trainer App's own end-of-session ranking convention.
-    const ranked = await this.prisma.sessionMember.findMany({ where: { sessionId }, orderBy: [{ score: 'desc' }] });
-    await this.prisma.$transaction(
-      ranked.map((r, i) => this.prisma.sessionMember.update({ where: { id: r.id }, data: { finalRank: r.score != null ? i + 1 : null } })),
-    );
+    await this.reRankSession(sessionId);
 
     return { sessionId, memberCount: members.length, results };
   }
@@ -941,12 +948,18 @@ export class SessionsService {
         session: { status: 'completed', ...(scopeGymId ? { gymId: scopeGymId } : {}) },
         OR: [{ sweatPoints: null }, { epocCalories: null }, { maxPctMhr: null }, { avgPctMhr: null }, { recoveryPoints: null }],
       },
-      select: { id: true, sessionId: true, memberId: true },
+      select: {
+        id: true, sessionId: true, memberId: true,
+        score: true, resultSubmittedAt: true,
+        sweatPoints: true, recoveryPoints: true, epocCalories: true, epocHours: true,
+        avgPctMhr: true, maxPctMhr: true,
+      },
       take: limit,
     });
 
     let updated = 0;
     let zeroFilled = 0;
+    let kept = 0;
     const touchedSessions = new Set<string>();
 
     for (const cm of candidateMembers) {
@@ -955,18 +968,28 @@ export class SessionsService {
         touchedSessions.add(cm.sessionId);
         if (r.recalculated) {
           updated++;
-        } else {
-          // No sensor readings at all — guarantee a real zero instead
-          // of leaving these fields null forever.
+        } else if (cm.resultSubmittedAt == null && cm.score == null) {
+          // No readings AND no result of any kind — this member never
+          // produced a workout, so explicit zeros are honest. Only the
+          // fields that are actually blank are written.
           await this.prisma.sessionMember.update({
             where: { id: cm.id },
             data: {
-              sweatPoints: 0, recoveryPoints: 0, recoveryGrade: null,
-              epocCalories: 0, epocHours: 0, avgPctMhr: 0, maxPctMhr: 0,
-              score: 0,
+              ...(cm.sweatPoints == null ? { sweatPoints: 0 } : {}),
+              ...(cm.recoveryPoints == null ? { recoveryPoints: 0 } : {}),
+              ...(cm.epocCalories == null ? { epocCalories: 0 } : {}),
+              ...(cm.epocHours == null ? { epocHours: 0 } : {}),
+              ...(cm.avgPctMhr == null ? { avgPctMhr: 0 } : {}),
+              ...(cm.maxPctMhr == null ? { maxPctMhr: 0 } : {}),
             },
           });
           zeroFilled++;
+        } else {
+          // Real result on record but no raw log (the readings were purged
+          // after the retention window, or the member simply skipped the
+          // recovery challenge). Leave it alone — this used to write
+          // score: 0 over real scores.
+          kept++;
         }
       } catch (e) {
         // One corrupt/edge-case member must never abort the whole
@@ -977,14 +1000,35 @@ export class SessionsService {
 
     let sessionsReRanked = 0;
     for (const sessionId of touchedSessions) {
-      const ranked = await this.prisma.sessionMember.findMany({ where: { sessionId }, orderBy: [{ score: 'desc' }] });
-      await this.prisma.$transaction(
-        ranked.map((r, i) => this.prisma.sessionMember.update({ where: { id: r.id }, data: { finalRank: r.score != null ? i + 1 : null } })),
-      );
+      await this.reRankSession(sessionId);
       sessionsReRanked++;
     }
 
-    return { processed: candidateMembers.length, updated, zeroFilled, sessionsReRanked, truncatedAtLimit: candidateMembers.length === limit };
+    return { processed: candidateMembers.length, updated, zeroFilled, kept, sessionsReRanked, truncatedAtLimit: candidateMembers.length === limit };
+  }
+
+  /**
+   * Writes leaderboard positions for one session from its stored scores.
+   *
+   * NULLS LAST matters: Postgres sorts NULLs FIRST on DESC by default, so
+   * every member with no score landed at the top and pushed every real
+   * rank up by one (member with 55 points showing as #3 behind two blank
+   * rows). Members with no result get a null rank, after everyone scored.
+   */
+  private async reRankSession(sessionId: string): Promise<void> {
+    const ranked = await this.prisma.sessionMember.findMany({
+      where: { sessionId },
+      orderBy: [{ score: { sort: 'desc', nulls: 'last' } }],
+    });
+    if (ranked.length === 0) return;
+    await this.prisma.$transaction(
+      ranked.map((r, i) =>
+        this.prisma.sessionMember.update({
+          where: { id: r.id },
+          data: { finalRank: r.score != null ? i + 1 : null },
+        }),
+      ),
+    );
   }
 
   private async assertOwnedByTrainer(sessionId: string, trainerId: string) {
@@ -1098,20 +1142,7 @@ export class SessionsService {
         }
       }
 
-      const ranked = await this.prisma.sessionMember.findMany({
-        where: { sessionId: candidate.id },
-        orderBy: [{ score: 'desc' }],
-      });
-      if (ranked.length > 0) {
-        await this.prisma.$transaction(
-          ranked.map((r, i) =>
-            this.prisma.sessionMember.update({
-              where: { id: r.id },
-              data: { finalRank: r.score != null ? i + 1 : null },
-            }),
-          ),
-        );
-      }
+      await this.reRankSession(candidate.id);
 
       await this.auditLog.record({
         actorType: 'system',

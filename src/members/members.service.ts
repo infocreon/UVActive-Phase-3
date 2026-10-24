@@ -215,8 +215,8 @@ export class MembersService {
   // behavior — actually worse: the roster used to carry no count at all
   // and the UI fell back to `?? 0`, pinning the column at zero) would
   // mix in sessions from other branches the member has visited.
-  listForGym(gymId: string) {
-    return this.prisma.member.findMany({
+  async listForGym(gymId: string) {
+    const rows = await this.prisma.member.findMany({
       where: { currentGymId: gymId },
       orderBy: { name: 'asc' },
       include: {
@@ -227,6 +227,12 @@ export class MembersService {
         },
       },
     });
+    // This roster is served to the trainer role and the Trainer App caches
+    // every GET it makes in on-device SQLite — so it must never carry the
+    // credential/device columns the auth paths need. Returning the whole
+    // Member row put pinHash (a 4–6 digit PIN, brute-forceable offline in
+    // seconds), passwordHash and pushToken onto every trainer's phone.
+    return rows.map((m) => this.staffSafeMember(m));
   }
 
   /**
@@ -279,6 +285,10 @@ export class MembersService {
     const sessions = sessionMembers.map((sm) => ({
       sessionId: sm.sessionId,
       sessionName: sm.session.name,
+      // Without the status a consumer can't tell a workout that happened
+      // from a future booking or a cancelled slot — every enrollment used
+      // to look like a session the athlete had trained.
+      status: sm.session.status,
       startedAt: sm.session.startedAt ?? sm.session.scheduledAt ?? sm.session.createdAt,
       endedAt: sm.session.endedAt,
       avgHr: sm.avgHr,
@@ -356,7 +366,7 @@ export class MembersService {
     const withAvg = sessionMembers.filter((sm) => sm.avgHr != null);
     const avgBpmOverall = withAvg.length ? withAvg.reduce((sum, sm) => sum + (sm.avgHr ?? 0), 0) / withAvg.length : null;
 
-    return { member, sessions, avgBpmOverall, hrTicks, memberHistoryTicks: hrTicks };
+    return { member: this.staffSafeMember(member), sessions, avgBpmOverall, hrTicks, memberHistoryTicks: hrTicks };
   }
 
   // `gymId` is optional — the Admin Panel's member list can be viewed
@@ -389,10 +399,11 @@ export class MembersService {
       const existingEmail = await this.prisma.member.findUnique({ where: { email: dto.email } });
       if (existingEmail) throw new ConflictException('A member with this email already exists.');
     }
-    return this.prisma.member.update({
+    const updated = await this.prisma.member.update({
       where: { id },
       data: { ...dto, dob: dto.dob ? new Date(dto.dob) : undefined },
     });
+    return this.staffSafeMember(updated);
   }
 
   // ── Release (branch-initiated, no consent needed — it's their own roster) ──
@@ -764,5 +775,21 @@ export class MembersService {
 
   private publicShape(m: { id: string; memberCode: string; name: string; phone: string | null; email: string | null; currentGymId: string | null }) {
     return { id: m.id, memberCode: m.memberCode, name: m.name, phone: m.phone, email: m.email, currentGymId: m.currentGymId };
+  }
+
+  /**
+   * A Member row minus the columns that must never reach a trainer's
+   * device: the PIN/password hashes, the push token, and the lockout
+   * counters that only matter to the auth service. Everything the branch
+   * UI actually renders (bio, code, status, gym, relations) is kept.
+   */
+  private staffSafeMember<T extends object>(m: T): T {
+    const copy = { ...m } as Record<string, unknown>;
+    delete copy.pinHash;
+    delete copy.passwordHash;
+    delete copy.pushToken;
+    delete copy.failedPinAttempts;
+    delete copy.lockedUntil;
+    return copy as T;
   }
 }
