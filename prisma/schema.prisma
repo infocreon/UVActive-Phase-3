@@ -462,6 +462,12 @@ model SessionMember {
   readings SensorReading[]
 
   @@unique([sessionId, memberId])
+  // Member App history (GET /member/sessions), the Member App workout
+  // detail, and the Trainer/Branch athlete profile all look this table
+  // up by member_id — the UNIQUE above only helps queries that lead
+  // with session_id, so without this every one of those reads is a
+  // sequential scan of the whole table once sessions accumulate.
+  @@index([memberId])
   @@map("session_members")
 }
 

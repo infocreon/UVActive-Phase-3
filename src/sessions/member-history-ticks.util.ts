@@ -22,7 +22,13 @@ export async function getMemberHistoryTicks(
   prisma: {
     sessionMemberFindMany: (args: {
       where: { memberId: string; session: { gymId: string } };
-      include: { session: true; chartSeries: true };
+      // Only the session relation is included. `chartSeries` is a SCALAR
+      // column on session_members, not a relation — putting it inside
+      // `include` made Prisma throw "Unknown field chartSeries" and this
+      // endpoint answered 500 for every member, which is why the Trainer
+      // App's cross-session HR curve never loaded. Scalar columns are
+      // returned by default, so the cast below still gets chartSeries.
+      include: { session: true };
       orderBy: { enrolledAt: 'desc' };
       take: number;
     }) => Promise<Array<{
@@ -43,7 +49,7 @@ export async function getMemberHistoryTicks(
 ): Promise<{ ts: number; bpm: number; zone: number; pctMhr: number }[]> {
   const sessionMembers = await prisma.sessionMemberFindMany({
     where: { memberId, session: { gymId } },
-    include: { session: true, chartSeries: true },
+    include: { session: true },
     orderBy: { enrolledAt: 'desc' },
     take: RECENT_SESSIONS_FOR_GRAPH,
   });

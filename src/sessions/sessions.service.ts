@@ -253,7 +253,27 @@ export class SessionsService {
       where: { id },
       include: {
         trainer: { select: { id: true, name: true } },
-        members: { include: { member: { select: { id: true, name: true, memberCode: true } } } },
+        // Explicit select rather than `include: { member }`: this used to
+        // ship every SessionMember column including `chart_series`, the
+        // downsampled BPM blob (~200-300 points, tens of KB per member)
+        // that has its own `/athlete/:memberId/ticks` endpoint. Every
+        // session-detail open (Trainer App, Branch Portal, Admin Panel)
+        // paid to transfer data no client reads from here — which is
+        // exactly what the "graph blob has its own endpoint" comment on
+        // stripChartSeries() says must not happen. Result fields are all
+        // kept; only the graph blob is excluded.
+        members: {
+          select: {
+            id: true, sessionId: true, memberId: true,
+            enrolledAt: true, enrolledBy: true, attendance: true,
+            avgHr: true, maxHr: true, calories: true, zoneMinutes: true, score: true,
+            sweatPoints: true, recoveryPoints: true, recoveryGrade: true,
+            epocCalories: true, epocHours: true, avgPctMhr: true, maxPctMhr: true,
+            finalRank: true, consistencyPct: true,
+            resultSubmittedAt: true, syncedAt: true,
+            member: { select: { id: true, name: true, memberCode: true } },
+          },
+        },
       },
     });
     if (!session) throw new NotFoundException('Session not found.');
